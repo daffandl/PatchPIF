@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e  # Berhenti jika ada perintah gagal
 
 ensure_zipalign() {
     if command -v zipalign &> /dev/null; then
@@ -7,11 +8,9 @@ ensure_zipalign() {
 
     echo "⚠️ zipalign not found. Installing dependencies and zipalign..."
 
-    # Install base packages via apt as requested
     sudo apt-get update -qq
     sudo apt-get install -y -qq openjdk-17-jre android-sdk-libsparse-utils android-sdk-platform-tools zip unzip wget
 
-    # Download zipalign (not available in apt)
     wget -q -O /tmp/zipalign https://github.com/AndroidSDKPlatformTools/android-sdk-platform-tools/raw/main/zipalign
     chmod +x /tmp/zipalign
     sudo mv /tmp/zipalign /usr/local/bin/
@@ -23,15 +22,19 @@ ensure_zipalign() {
     echo "✅ zipalign is ready."
 }
 
-# Run setup
 ensure_zipalign
 
-# === SCRIPT ANDA DIMULAI DI SINI (sama seperti sebelumnya) ===
-dirnow=$PWD
+dirnow="$PWD"
 
 if [[ ! -f "$dirnow/framework.jar" ]]; then
-   echo "no framework.jar detected!"
-   exit 1
+    echo "❌ No framework.jar detected in $dirnow!"
+    exit 1
+fi
+
+# Backup otomatis (opsional tapi aman)
+if [[ ! -f "$dirnow/framework.jar.bak" ]]; then
+    echo "Creating backup: framework.jar.bak"
+    cp "$dirnow/framework.jar" "$dirnow/framework.jar.bak"
 fi
 
 apkeditor() {
@@ -41,100 +44,119 @@ apkeditor() {
 }
 
 certificatechainPatch() {
- certificatechainPatch="
+    echo "
     .line $1
     invoke-static {}, Lcom/android/internal/util/danda/OemPorts10TUtils;->onEngineGetCertificateChain()V
 "
 }
 
 instrumentationPatch() {
-	returnline=$(expr $2 + 1)
-	instrumentationPatch="    invoke-static {$1}, Lcom/android/internal/util/danda/OemPorts10TUtils;->onNewApplication(Landroid/content/Context;)V
+    local returnline=$(( $2 + 1 ))
+    echo "    invoke-static {$1}, Lcom/android/internal/util/danda/OemPorts10TUtils;->onNewApplication(Landroid/content/Context;)V
     
     .line $returnline
     "
 }
 
 blSpoofPatch() {
-	blSpoofPatch="    invoke-static {$1}, Lcom/android/internal/util/danda/OemPorts10TUtils;->genCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
+    echo "    invoke-static {$1}, Lcom/android/internal/util/danda/OemPorts10TUtils;->genCertificateChain([Ljava/security/cert/Certificate;)[Ljava/security/cert/Certificate;
 	
     move-result-object $1
     "
 }
 
 expressions_fix() {
-	var=$1
-	escaped_var=$(printf '%s\n' "$var" | sed 's/[\/&]/\\&/g')
-	escaped_var=$(printf '%s\n' "$escaped_var" | sed 's/\[/\\[/g' | sed 's/\]/\\]/g' | sed 's/\./\\./g' | sed 's/;/\\;/g')
-	echo "$escaped_var"
+    local var="$1"
+    local escaped_var
+    escaped_var=$(printf '%s' "$var" | sed 's/[\/&]/\\&/g')
+    escaped_var=$(printf '%s' "$escaped_var" | sed 's/\[/\\[/g; s/\]/\\]/g; s/\./\\./g; s/;/\\;/g')
+    echo "$escaped_var"
 }
 
-echo "unpacking framework.jar"
-apkeditor d -i framework.jar -o frmwrk > /dev/null 2>&1
+echo "🔧 Unpacking framework.jar..."
+apkeditor d -i framework.jar -o frmwrk
 mv framework.jar frmwrk.jar
 
-echo "patching framework.jar"
+echo "🪛 Patching framework.jar..."
 
 keystorespiclassfile=$(find frmwrk/ -name 'AndroidKeyStoreSpi.smali' -printf '%P\n')
 instrumentationsmali=$(find frmwrk/ -name "Instrumentation.smali" -printf '%P\n')
 
-engineGetCertMethod=$(expressions_fix "$(grep 'engineGetCertificateChain(' frmwrk/$keystorespiclassfile)")
-newAppMethod1=$(expressions_fix "$(grep 'newApplication(Ljava/lang/ClassLoader;' frmwrk/$instrumentationsmali)")
-newAppMethod2=$(expressions_fix "$(grep 'newApplication(Ljava/lang/Class;' frmwrk/$instrumentationsmali)")
+if [[ -z "$keystorespiclassfile" ]]; then
+    echo "❌ AndroidKeyStoreSpi.smali not found!"
+    exit 1
+fi
+if [[ -z "$instrumentationsmali" ]]; then
+    echo "❌ Instrumentation.smali not found!"
+    exit 1
+fi
 
-sed -n "/^${engineGetCertMethod}/,/^\.end method/p" frmwrk/$keystorespiclassfile > tmp_keystore
-sed -i "/^${engineGetCertMethod}/,/^\.end method/d" frmwrk/$keystorespiclassfile
+engineGetCertMethod=$(expressions_fix "$(grep -m1 'engineGetCertificateChain(' "frmwrk/$keystorespiclassfile")")
+newAppMethod1=$(expressions_fix "$(grep -m1 'newApplication(Ljava/lang/ClassLoader;' "frmwrk/$instrumentationsmali")")
+newAppMethod2=$(expressions_fix "$(grep -m1 'newApplication(Ljava/lang/Class;' "frmwrk/$instrumentationsmali")")
 
-sed -n "/^${newAppMethod1}/,/^\.end method/p" frmwrk/$instrumentationsmali > inst1
-sed -i "/^${newAppMethod1}/,/^\.end method/d" frmwrk/$instrumentationsmali
+# Ekstrak & hapus method
+sed -n "/^${engineGetCertMethod}/,/^\.end method/p" "frmwrk/$keystorespiclassfile" > tmp_keystore
+sed -i "/^${engineGetCertMethod}/,/^\.end method/d" "frmwrk/$keystorespiclassfile"
 
-sed -n "/^${newAppMethod2}/,/^\.end method/p" frmwrk/$instrumentationsmali > inst2
-sed -i "/^${newAppMethod2}/,/^\.end method/d" frmwrk/$instrumentationsmali
+sed -n "/^${newAppMethod1}/,/^\.end method/p" "frmwrk/$instrumentationsmali" > inst1
+sed -i "/^${newAppMethod1}/,/^\.end method/d" "frmwrk/$instrumentationsmali"
 
-inst1_insert=$(expr $(wc -l < inst1) - 2)
+sed -n "/^${newAppMethod2}/,/^\.end method/p" "frmwrk/$instrumentationsmali" > inst2
+sed -i "/^${newAppMethod2}/,/^\.end method/d" "frmwrk/$instrumentationsmali"
+
+# Patch Instrumentation newApplication 1
+inst1_insert=$(( $(wc -l < inst1) - 2 ))
 instreg=$(grep "Landroid/app/Application;->attach(Landroid/content/Context;)V" inst1 | awk '{print $3}' | sed 's/},//')
-instline=$(expr $(grep -r ".line" inst1 | tail -n 1 | awk '{print $2}') + 1)
-instrumentationPatch $instreg $instline
-echo "$instrumentationPatch" | sed -i "${inst1_insert}r /dev/stdin" inst1
+instline=$(( $(grep -E "^\s*\.line\s+[0-9]+" inst1 | tail -n1 | awk '{print $2}') + 1 ))
+instrumentationPatch "$instreg" "$instline" | sed -i "${inst1_insert}r /dev/stdin" inst1
 
-inst2_insert=$(expr $(wc -l < inst2) - 2)
+# Patch Instrumentation newApplication 2
+inst2_insert=$(( $(wc -l < inst2) - 2 ))
 instreg=$(grep "Landroid/app/Application;->attach(Landroid/content/Context;)V" inst2 | awk '{print $3}' | sed 's/},//')
-instline=$(expr $(grep -r ".line" inst2 | tail -n 1 | awk '{print $2}') + 1)
-instrumentationPatch $instreg $instline
-echo "$instrumentationPatch" | sed -i "${inst2_insert}r /dev/stdin" inst2
+instline=$(( $(grep -E "^\s*\.line\s+[0-9]+" inst2 | tail -n1 | awk '{print $2}') + 1 ))
+instrumentationPatch "$instreg" "$instline" | sed -i "${inst2_insert}r /dev/stdin" inst2
 
-kstoreline=$(expr $(grep -r ".line" tmp_keystore | head -n 1 | awk '{print $2}') - 2)
-certificatechainPatch $kstoreline
-echo "$certificatechainPatch" | sed -i '4r /dev/stdin' tmp_keystore
+# Patch AndroidKeyStoreSpi
+kstoreline=$(( $(grep -E "^\s*\.line\s+[0-9]+" tmp_keystore | head -n1 | awk '{print $2}') - 2 ))
+certificatechainPatch "$kstoreline" | sed -i '4r /dev/stdin' tmp_keystore
 
-lastaput=$(grep "aput-object" tmp_keystore | tail -n 1)
-leafcert=$(echo $lastaput | awk '{print $3}' | awk -F',' '{print $1}')
-blspoof_insert=$(expr $(grep -n "$lastaput" tmp_keystore | awk -F':' '{print $1}') + 1)
-blSpoofPatch $leafcert
-echo "$blSpoofPatch" | sed -i "${blspoof_insert}r /dev/stdin" tmp_keystore
+lastaput=$(grep "aput-object" tmp_keystore | tail -n1)
+leafcert=$(echo "$lastaput" | awk '{print $3}' | cut -d',' -f1)
+blspoof_insert=$(( $(grep -n "$lastaput" tmp_keystore | cut -d: -f1) + 1 ))
+blSpoofPatch "$leafcert" | sed -i "${blspoof_insert}r /dev/stdin" tmp_keystore
 
-cat inst1 >> frmwrk/$instrumentationsmali
-cat inst2 >> frmwrk/$instrumentationsmali
-cat tmp_keystore >> frmwrk/$keystorespiclassfile
+# Gabungkan kembali
+cat inst1 >> "frmwrk/$instrumentationsmali"
+cat inst2 >> "frmwrk/$instrumentationsmali"
+cat tmp_keystore >> "frmwrk/$keystorespiclassfile"
 
-rm -rf inst1 inst2 tmp_keystore
+rm -f inst1 inst2 tmp_keystore
 
-echo "repacking framework.jar classes"
-apkeditor b -i frmwrk > /dev/null 2>&1
-unzip frmwrk_out.apk 'classes*.dex' -d frmwrk > /dev/null 2>&1
+echo "📦 Repacking framework.jar classes..."
+apkeditor b -i frmwrk
+unzip -q frmwrk_out.apk 'classes*.dex' -d frmwrk
 
-rm -rf frmwrk/.cache
-patchclass=$(expr $(find frmwrk/ -type f -name '*.dex' | wc -l) + 1)
-cp PIF/classes.dex frmwrk/classes${patchclass}.dex
+# Tambahkan PIF/classes.dex
+if [[ ! -f "PIF/classes.dex" ]]; then
+    echo "❌ PIF/classes.dex not found! Required for patching."
+    exit 1
+fi
+patchclass=$(( $(find frmwrk/ -name '*.dex' | wc -l) + 1 ))
+cp PIF/classes.dex "frmwrk/classes${patchclass}.dex"
 
+echo "🔖 Zipping classes into JAR..."
 cd frmwrk
-echo "zipping class"
-zip -qr0 -t 07302003 "$dirnow/frmwrk.jar" classes*
+zip -qr0 "$dirnow/frmwrk.jar" classes*
 cd "$dirnow"
 
-echo "zipaligning framework.jar"
-zipalign -v 4 frmwrk.jar framework.jar > /dev/null
+echo "⚡ Zipaligning final framework.jar..."
+zipalign -v 4 frmwrk.jar framework.jar
 
-rm -rf frmwrk.jar frmwrk frmwrk_out.apk
+# Bersihkan
+rm -rf frmwrk frmwrk_out.apk frmwrk.jar
 
-echo "✅ Patching completed successfully!"
+echo
+echo "✅ SUCCESS! Patched framework.jar is ready in:"
+echo "   $dirnow/framework.jar"
+echo "   (Original backed up as framework.jar.bak)"
