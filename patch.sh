@@ -8,7 +8,7 @@ ensure_official_zipalign() {
     if ! command -v zipalign &> /dev/null; then
         need_install=true
     else
-        # Verifikasi apakah ini zipalign asli (cek bantuan)
+        # Verifikasi apakah ini zipalign asli
         if ! zipalign 2>&1 | grep -q "infile.zip outfile.zip"; then
             echo "⚠️ Detected non-functional zipalign. Reinstalling official version..."
             need_install=true
@@ -21,12 +21,12 @@ ensure_official_zipalign() {
         sudo apt-get update -qq
         sudo apt-get install -y -qq openjdk-17-jre zip unzip wget
 
-        # Unduh build-tools resmi
-        wget -q https://dl.google.com/android/repository/build-tools_r34-linux.zip
-        unzip -q build-tools_r34-linux.zip
-        sudo mv build-tools/34.0.0/zipalign /usr/local/bin/
+        # Unduh build-tools versi 34.0.0 (nama file spesifik)
+        wget -q https://dl.google.com/android/repository/build-tools_r34.0.0-linux.zip
+        unzip -q build-tools_r34.0.0-linux.zip
+        sudo mv build-tools/zipalign /usr/local/bin/
         sudo chmod +x /usr/local/bin/zipalign
-        rm -rf build-tools_r34-linux.zip build-tools/
+        rm -rf build-tools_r34.0.0-linux.zip build-tools/
 
         echo "✅ Official zipalign installed."
     else
