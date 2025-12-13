@@ -1,27 +1,26 @@
 #!/bin/bash
-set -euo pipefail  # Berhenti pada error, variabel tak terdefinisi, atau pipe gagal
+set -euo pipefail
 
-# === 1. Pastikan zipalign resmi dari Google tersedia ===
+# === 1. Instal zipalign resmi dari Google (versi 34.0.0) ===
 ensure_official_zipalign() {
     local need_install=false
 
     if ! command -v zipalign &> /dev/null; then
         need_install=true
     else
-        # Verifikasi apakah ini zipalign asli
-        if ! zipalign 2>&1 | grep -q "infile.zip outfile.zip"; then
-            echo "⚠️ Detected non-functional zipalign. Reinstalling official version..."
+        if ! zipalign 2>&1 | grep -q "infile.zip outfile.zip" >/dev/null 2>&1; then
+            echo "⚠️ Non-functional zipalign detected. Reinstalling..."
             need_install=true
         fi
     fi
 
     if [ "$need_install" = true ]; then
-        echo "🔧 Installing official zipalign from Google..."
+        echo "🔧 Installing official zipalign (build-tools 34.0.0) from Google..."
 
         sudo apt-get update -qq
         sudo apt-get install -y -qq openjdk-17-jre zip unzip wget
 
-        # Unduh build-tools versi 34.0.0 (nama file spesifik)
+        # URL resmi dengan versi spesifik (struktur folder: build-tools/zipalign)
         wget -q https://dl.google.com/android/repository/build-tools_r34.0.0-linux.zip
         unzip -q build-tools_r34.0.0-linux.zip
         sudo mv build-tools/zipalign /usr/local/bin/
@@ -36,7 +35,7 @@ ensure_official_zipalign() {
 
 ensure_official_zipalign
 
-# === 2. Persiapan ===
+# === 2. Persiapan Awal ===
 dirnow="$PWD"
 
 if [[ ! -f "$dirnow/framework.jar" ]]; then
@@ -44,20 +43,20 @@ if [[ ! -f "$dirnow/framework.jar" ]]; then
     exit 1
 fi
 
-# Backup otomatis (hanya jika belum ada)
+# Backup otomatis (sekali saja)
 if [[ ! -f "$dirnow/framework.jar.bak" ]]; then
     echo "💾 Creating backup: framework.jar.bak"
     cp "$dirnow/framework.jar" "$dirnow/framework.jar.bak"
 fi
 
-# Cek dependensi eksternal
+# Cek dependensi
 if [[ ! -f "$dirnow/tool/APKEditor.jar" ]]; then
-    echo "❌ Missing tool/APKEditor.jar!"
+    echo "❌ Missing: tool/APKEditor.jar"
     exit 1
 fi
 
 if [[ ! -f "$dirnow/PIF/classes.dex" ]]; then
-    echo "❌ Missing PIF/classes.dex!"
+    echo "❌ Missing: PIF/classes.dex"
     exit 1
 fi
 
@@ -75,13 +74,12 @@ expressions_fix() {
     printf '%s' "$var" | sed 's/[\/&]/\\&/g; s/\[/\\[/g; s/\]/\\]/g; s/\./\\./g; s/;/\\;/g'
 }
 
-# === 4. Unpack ===
+# === 4. Mulai Patching ===
 echo "📦 Unpacking framework.jar..."
 apkeditor d -i framework.jar -o frmwrk
 mv framework.jar frmwrk.jar
 
-# === 5. Temukan file target ===
-echo "🔍 Locating target files..."
+echo "🔍 Locating target Smali files..."
 keystorespiclassfile=$(find frmwrk/ -name 'AndroidKeyStoreSpi.smali' -print -quit)
 instrumentationsmali=$(find frmwrk/ -name 'Instrumentation.smali' -print -quit)
 
@@ -94,7 +92,7 @@ if [[ -z "$instrumentationsmali" ]]; then
     exit 1
 fi
 
-# === 6. Ekstrak method ===
+# === 5. Ekstrak & Patch Method ===
 engineGetCertMethod=$(expressions_fix "$(grep -m1 'engineGetCertificateChain(' "$keystorespiclassfile")")
 newAppMethod1=$(expressions_fix "$(grep -m1 'newApplication(Ljava/lang/ClassLoader;' "$instrumentationsmali")")
 newAppMethod2=$(expressions_fix "$(grep -m1 'newApplication(Ljava/lang/Class;' "$instrumentationsmali")")
@@ -108,7 +106,6 @@ sed -i "/^${newAppMethod1}/,/^\.end method/d" "$instrumentationsmali"
 sed -n "/^${newAppMethod2}/,/^\.end method/p" "$instrumentationsmali" > inst2
 sed -i "/^${newAppMethod2}/,/^\.end method/d" "$instrumentationsmali"
 
-# === 7. Patch ===
 # Patch Instrumentation (method 1)
 inst1_insert=$(( $(wc -l < inst1) - 2 ))
 instreg=$(grep "Landroid/app/Application;->attach(Landroid/content/Context;)V" inst1 | awk '{print $3}' | sed 's/},//')
@@ -146,43 +143,40 @@ blspoof_insert=$(( $(grep -n "$lastaput" tmp_keystore | cut -d: -f1) + 1 ))
     echo "    move-result-object $leafcert"
 } | sed -i "${blspoof_insert}r /dev/stdin" tmp_keystore
 
-# Gabungkan kembali
+# Gabung kembali
 cat inst1 >> "$instrumentationsmali"
 cat inst2 >> "$instrumentationsmali"
 cat tmp_keystore >> "$keystorespiclassfile"
 
 rm -f inst1 inst2 tmp_keystore
 
-# === 8. Repack ===
+# === 6. Repack & Build ===
 echo "🔄 Repacking patched classes..."
 apkeditor b -i frmwrk
-
-# Ekstrak DEX
 unzip -q frmwrk_out.apk 'classes*.dex' -d frmwrk
 
-# Tambahkan PIF
 patchclass=$(( $(find frmwrk/ -name '*.dex' | wc -l) + 1 ))
 cp PIF/classes.dex "frmwrk/classes${patchclass}.dex"
 
-# Buat JAR sementara
+echo "🔖 Creating JAR archive..."
 cd frmwrk
 zip -qr0 "$dirnow/frmwrk.jar" classes*
 cd "$dirnow"
 
-# === 9. Zipalign resmi ===
-echo "⚡ Applying zipalign (official)..."
+# === 7. Zipalign Final ===
+echo "⚡ Applying zipalign..."
 zipalign -v 4 frmwrk.jar framework.jar
 
-# Verifikasi
+# Validasi akhir
 if [[ ! -f "framework.jar" ]]; then
-    echo "❌ Fatal: framework.jar was not created after zipalign!"
+    echo "❌ CRITICAL: framework.jar was NOT created after zipalign!"
     exit 1
 fi
 
-# === 10. Bersihkan ===
+# Bersihkan
 rm -rf frmwrk frmwrk_out.apk frmwrk.jar
 
 echo
-echo "✅ SUCCESS!"
-echo "📁 Output: $dirnow/framework.jar"
+echo "✅ SUCCESS! Patched framework.jar is ready."
+echo "📁 Location: $dirnow/framework.jar"
 echo "🛡️  Backup: $dirnow/framework.jar.bak"
